@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m jupyter nbconvert --to notebook --execute --ExecutePreprocessor.timeout=600 --ExecutePreprocessor.kernel_name=python3 notebooks/02_simple_lstm.ipynb --output notebooks/02_simple_lstm_run.ipynb)",
+      "Bash(python3)"
+    ]
+  }
+}

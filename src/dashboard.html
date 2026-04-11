@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Neural Sentinel — Live IDS Dashboard</title>
+<style>
+  :root {
+    --bg: #080c10;
+    --panel: #0d1117;
+    --border: #21262d;
+    --green: #39d353;
+    --red: #f85149;
+    --amber: #e3b341;
+    --blue: #58a6ff;
+    --muted: #8b949e;
+    --text: #c9d1d9;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Courier New', monospace;
+    min-height: 100vh;
+    padding: 20px;
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 24px;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 16px;
+  }
+
+  .logo {
+    font-size: 1.6rem;
+    font-weight: bold;
+    color: var(--green);
+    letter-spacing: 2px;
+    text-shadow: 0 0 12px #39d35388;
+  }
+
+  .status-dot {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 8px var(--green);
+    animation: pulse 1.5s infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: 0.3; }
+  }
+
+  .subtitle { color: var(--muted); font-size: 0.85rem; }
+
+  /* Stats cards */
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+    margin-bottom: 24px;
+  }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    text-align: center;
+  }
+
+  .card-value {
+    font-size: 2.2rem;
+    font-weight: bold;
+    line-height: 1.1;
+  }
+
+  .card-label { font-size: 0.75rem; color: var(--muted); margin-top: 4px; }
+  .val-green  { color: var(--green); text-shadow: 0 0 8px #39d35366; }
+  .val-red    { color: var(--red);   text-shadow: 0 0 8px #f8514966; }
+  .val-amber  { color: var(--amber); }
+  .val-blue   { color: var(--blue);  }
+
+  /* Alert table */
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+
+  .panel-header {
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.8rem;
+    color: var(--muted);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.82rem;
+  }
+
+  th {
+    background: #161b22;
+    color: var(--muted);
+    font-weight: normal;
+    padding: 8px 12px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+  }
+
+  td {
+    padding: 7px 12px;
+    border-bottom: 1px solid #161b22;
+    font-family: 'Courier New', monospace;
+  }
+
+  tr.attack { background: rgba(248, 81, 73, 0.06); }
+  tr.normal { background: rgba(57, 211, 83, 0.03); }
+
+  tr.new-alert { animation: flash 0.5s ease-out; }
+
+  @keyframes flash {
+    0%   { background: rgba(248, 81, 73, 0.3); }
+    100% { background: rgba(248, 81, 73, 0.06); }
+  }
+
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-size: 0.75rem;
+    font-weight: bold;
+  }
+
+  .badge-attack { background: rgba(248,81,73,0.2); color: var(--red);   border: 1px solid #f8514944; }
+  .badge-normal { background: rgba(57,211,83,0.15); color: var(--green); border: 1px solid #39d35344; }
+
+  .conf-bar {
+    display: inline-block;
+    height: 6px;
+    border-radius: 3px;
+    vertical-align: middle;
+    margin-right: 6px;
+  }
+
+  .conf-attack { background: var(--red); }
+  .conf-normal { background: var(--green); }
+
+  #no-data {
+    text-align: center;
+    padding: 40px;
+    color: var(--muted);
+    display: none;
+  }
+
+  footer {
+    margin-top: 16px;
+    text-align: right;
+    font-size: 0.72rem;
+    color: var(--muted);
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">&#9632; NEURAL SENTINEL</div>
+  <div class="status-dot"></div>
+  <div class="subtitle">Bi-LSTM Intrusion Detection &mdash; UNSW-NB15 Model &mdash; Live</div>
+</header>
+
+<div class="cards">
+  <div class="card">
+    <div class="card-value val-blue"  id="c-total">0</div>
+    <div class="card-label">SEQUENCES ANALYSED</div>
+  </div>
+  <div class="card">
+    <div class="card-value val-green" id="c-normal">0</div>
+    <div class="card-label">NORMAL TRAFFIC</div>
+  </div>
+  <div class="card">
+    <div class="card-value val-red"   id="c-attacks">0</div>
+    <div class="card-label">ATTACKS DETECTED</div>
+  </div>
+  <div class="card">
+    <div class="card-value val-amber" id="c-rate">0.00</div>
+    <div class="card-label">ALERTS / MINUTE</div>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="panel-header">
+    <span>LIVE ALERT FEED &mdash; last 50 events</span>
+    <span id="conn-status" style="color:var(--green)">&#9679; CONNECTED</span>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th>TIME</th>
+        <th>STATUS</th>
+        <th>ATTACK TYPE</th>
+        <th>SOURCE</th>
+        <th>DESTINATION</th>
+        <th>PROTO</th>
+        <th>SERVICE</th>
+        <th>CONFIDENCE</th>
+      </tr>
+    </thead>
+    <tbody id="alert-body">
+      <tr><td colspan="8" id="no-data" style="display:table-cell;text-align:center;color:#8b949e;padding:40px">
+        Waiting for traffic&hellip;
+      </td></tr>
+    </tbody>
+  </table>
+</div>
+
+<footer>Neural Sentinel &mdash; Bajpai &amp; Patankar (2025) Bi-LSTM Architecture &mdash; UNSW-NB15</footer>
+
+<script>
+  const MAX_ROWS = 50;
+  let rowCount = 0;
+  let total = 0, attacks = 0, normal = 0;
+  let startTime = Date.now();
+
+  function updateStats() {
+    document.getElementById('c-total').textContent   = total;
+    document.getElementById('c-normal').textContent  = normal;
+    document.getElementById('c-attacks').textContent = attacks;
+    const mins = Math.max((Date.now() - startTime) / 60000, 0.016);
+    document.getElementById('c-rate').textContent    = (attacks / mins).toFixed(2);
+  }
+
+  function addRow(a) {
+    const tbody = document.getElementById('alert-body');
+
+    // Remove placeholder
+    const ph = document.getElementById('no-data');
+    if (ph) ph.parentElement.remove();
+
+    const isAttack = a.label === 1;
+    const conf     = a.confidence;
+    const barW     = Math.round(conf * 60);
+    const barClass = isAttack ? 'conf-attack' : 'conf-normal';
+    const badge    = isAttack
+      ? '<span class="badge badge-attack">&#9888; ATTACK</span>'
+      : '<span class="badge badge-normal">&#10003; NORMAL</span>';
+
+    const tr = document.createElement('tr');
+    tr.className = (isAttack ? 'attack' : 'normal') + ' new-alert';
+    tr.innerHTML = `
+      <td>${a.time}</td>
+      <td>${badge}</td>
+      <td style="color:${isAttack ? 'var(--red)' : 'var(--green)'}">${a.attack_type}</td>
+      <td>${a.src}</td>
+      <td>${a.dst}</td>
+      <td style="color:var(--blue)">${a.proto.toUpperCase()}</td>
+      <td>${a.service}</td>
+      <td>
+        <span class="conf-bar ${barClass}" style="width:${barW}px"></span>
+        ${(conf * 100).toFixed(1)}%
+      </td>`;
+
+    tbody.insertBefore(tr, tbody.firstChild);
+
+    // Cap table length
+    rowCount++;
+    if (rowCount > MAX_ROWS) {
+      tbody.removeChild(tbody.lastChild);
+      rowCount--;
+    }
+  }
+
+  // Server-Sent Events
+  const es = new EventSource('/alerts');
+
+  es.onmessage = (e) => {
+    const a = JSON.parse(e.data);
+    total++;
+    if (a.label) attacks++; else normal++;
+    updateStats();
+    addRow(a);
+  };
+
+  es.onerror = () => {
+    document.getElementById('conn-status').textContent = '⚫ RECONNECTING...';
+    document.getElementById('conn-status').style.color = 'var(--amber)';
+  };
+
+  es.onopen = () => {
+    document.getElementById('conn-status').textContent = '● CONNECTED';
+    document.getElementById('conn-status').style.color = 'var(--green)';
+  };
+
+  // Refresh attack rate every second
+  setInterval(updateStats, 1000);
+</script>
+</body>
+</html>

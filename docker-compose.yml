@@ -1,0 +1,37 @@
+services:
+
+  sentinel:
+    build:
+      context: .
+      dockerfile: docker/sentinel/Dockerfile
+    container_name: sentinel
+    cap_add:
+      - NET_ADMIN   # needed for scapy raw socket capture
+      - NET_RAW
+    ports:
+      - "8000:8000"
+    networks:
+      - ids-net
+    environment:
+      - KERAS_BACKEND=torch
+      - KMP_DUPLICATE_LIB_OK=TRUE
+      - PYTHONUNBUFFERED=1
+      # Uncomment and set if auto-detect picks wrong interface:
+      # - SNIFF_IFACE=eth0
+    restart: unless-stopped
+
+  attacker:
+    build:
+      context: .
+      dockerfile: docker/attacker/Dockerfile
+    container_name: attacker
+    networks:
+      - ids-net
+    stdin_open: true
+    tty: true
+    # Keep container alive
+    entrypoint: ["/bin/bash"]
+
+networks:
+  ids-net:
+    driver: bridge
