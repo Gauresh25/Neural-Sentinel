@@ -23,6 +23,7 @@ os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 
 import numpy as np
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
 from pydantic import BaseModel
 
@@ -35,6 +36,7 @@ MODEL_PATH = ROOT / "models" / "bilstm_unsw_nb15.keras"
 DASHBOARD_PATH = Path(__file__).parent / "dashboard.html"
 
 app = FastAPI(title="Neural Sentinel")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 # ---------------------------------------------------------------------------
 # Shared state
@@ -42,8 +44,10 @@ app = FastAPI(title="Neural Sentinel")
 _model: keras.Model = None
 _alert_queue: asyncio.Queue = None
 _loop: asyncio.AbstractEventLoop = None
-_recent_alerts: deque = deque(maxlen=50)
-_stats = {"total": 0, "attacks": 0, "normal": 0, "start_time": time.time()}
+_recent_alerts: deque = deque(maxlen=500)
+_all_confidences: deque = deque(maxlen=500)   # (prob, label) for histogram
+_threshold: float = 0.5
+_stats = {"total": 0, "attacks": 0, "normal": 0, "start_time": time.time(), "by_category": {}}
 
 
 # ---------------------------------------------------------------------------
@@ -75,14 +79,20 @@ async def startup():
 
 def _handle_prediction(sequence: np.ndarray, raws: list) -> None:
     """Called from stream processor thread. Posts result to asyncio queue."""
+    global _threshold
     batch = sequence[np.newaxis, ...]           # (1, 10, 44)
     prob = float(_model.predict(batch, verbose=0).squeeze())
-    label = int(prob >= 0.5)
-    attack_type = StreamProcessor.heuristic_attack_type(raws) if label else "Normal"
+    label = int(prob >= _threshold)
+    attack_type = StreamProcessor.heuristic_attack_type(raws)
+    if not label and attack_type != "Generic":
+        label = 1   # heuristic override: clear signature even if model confidence is low
+    elif not label:
+        attack_type = "Normal"
 
     last_raw = raws[-1]
     alert = {
         "time": time.strftime("%H:%M:%S"),
+        "ts": time.time(),
         "src": last_raw.get("src_ip", "?"),
         "dst": last_raw.get("dst_ip", "?"),
         "proto": last_raw.get("proto", "?"),
@@ -92,9 +102,12 @@ def _handle_prediction(sequence: np.ndarray, raws: list) -> None:
         "attack_type": attack_type,
     }
 
+    _all_confidences.append((prob, label))
     _stats["total"] += 1
     if label:
         _stats["attacks"] += 1
+        cat = attack_type
+        _stats["by_category"][cat] = _stats["by_category"].get(cat, 0) + 1
     else:
         _stats["normal"] += 1
 
@@ -147,6 +160,72 @@ async def stats():
         "elapsed_s": round(elapsed, 1),
         "attack_rate": round(_stats["attacks"] / max(elapsed / 60, 0.01), 2),
     }
+
+
+@app.get("/summary")
+async def summary():
+    cats = dict(_stats["by_category"])
+    return {"categories": cats, "total_attacks": sum(cats.values())}
+
+
+@app.get("/confidence-distribution")
+async def confidence_distribution():
+    confs = list(_all_confidences)  # list of (prob, label)
+    bins = []
+    for i in range(10):
+        lo, hi = i / 10, (i + 1) / 10
+        label = f"{lo:.1f}–{hi:.1f}"
+        subset = [
+            (p, l) for p, l in confs
+            if lo <= p < hi or (i == 9 and p == 1.0)
+        ]
+        bins.append({
+            "range": label,
+            "total": len(subset),
+            "attack": sum(1 for _, l in subset if l == 1),
+            "normal": sum(1 for _, l in subset if l == 0),
+        })
+    return {"bins": bins, "threshold": _threshold}
+
+
+@app.get("/threat/{ip}")
+async def threat(ip: str):
+    alerts = list(_recent_alerts)
+    as_src = [a for a in alerts if a.get("src") == ip]
+    as_dst = [a for a in alerts if a.get("dst") == ip and a.get("src") != ip]
+    cats: dict = {}
+    for a in as_src + as_dst:
+        if a.get("label"):
+            t = a.get("attack_type", "Generic")
+            cats[t] = cats.get(t, 0) + 1
+    return {
+        "ip": ip,
+        "as_src": as_src[:100],
+        "as_dst": as_dst[:100],
+        "summary": {
+            "total": len(as_src) + len(as_dst),
+            "attacks": sum(1 for a in as_src + as_dst if a.get("label")),
+            "as_src": len(as_src),
+            "as_dst": len(as_dst),
+            "categories": cats,
+        },
+    }
+
+
+class ThresholdBody(BaseModel):
+    threshold: float
+
+
+@app.get("/threshold")
+async def get_threshold():
+    return {"threshold": _threshold}
+
+
+@app.post("/threshold")
+async def set_threshold(body: ThresholdBody):
+    global _threshold
+    _threshold = max(0.01, min(0.99, body.threshold))
+    return {"threshold": _threshold}
 
 
 @app.get("/dashboard", response_class=HTMLResponse)

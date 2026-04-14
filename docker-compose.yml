@@ -10,14 +10,25 @@ services:
       - NET_RAW
     ports:
       - "8000:8000"
+      - "2222:2222"   # SSH demo target for brute-force script
     networks:
       - ids-net
     environment:
       - KERAS_BACKEND=torch
       - KMP_DUPLICATE_LIB_OK=TRUE
       - PYTHONUNBUFFERED=1
-      # Uncomment and set if auto-detect picks wrong interface:
-      # - SNIFF_IFACE=eth0
+      - SNIFF_IFACE=eth0   # ids-net bridge interface inside the container
+    restart: unless-stopped
+
+  # Intentionally weak SSH target — gives the attacker something real to brute-force
+  # so the IDS can detect SSH Brute Force traffic on the shared network.
+  victim:
+    build:
+      context: .
+      dockerfile: docker/victim/Dockerfile
+    container_name: victim
+    networks:
+      - ids-net
     restart: unless-stopped
 
   attacker:
@@ -29,8 +40,26 @@ services:
       - ids-net
     stdin_open: true
     tty: true
+    depends_on:
+      - sentinel
+      - victim
     # Keep container alive
     entrypoint: ["/bin/bash"]
+
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/frontend/Dockerfile
+    container_name: sentinel-ui
+    ports:
+      - "3000:80"
+    networks:
+      - ids-net
+    environment:
+      - BACKEND_URL=http://sentinel:8000
+    depends_on:
+      - sentinel
+    restart: unless-stopped
 
 networks:
   ids-net:

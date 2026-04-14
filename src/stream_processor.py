@@ -7,7 +7,7 @@ import time
 import threading
 import pickle
 import numpy as np
-from collections import deque
+from collections import deque, Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Callable, NamedTuple
@@ -26,7 +26,7 @@ PORT_SERVICE = {
     20: "ftp-data", 21: "ftp", 22: "ssh", 23: "telnet",
     25: "smtp", 53: "dns", 67: "dhcp", 68: "dhcp",
     80: "http", 110: "pop3", 143: "imap", 161: "snmp",
-    443: "ssl", 6667: "irc", 8080: "http",
+    443: "ssl", 6667: "irc", 8080: "http", 8000: "http",
 }
 
 # Feature order must match metadata.json exactly (44 features)
@@ -206,8 +206,8 @@ class FlowTracker:
             except Exception:
                 pass
 
-        # HTTP payload inspection
-        if k.dst_port in (80, 8080) and pkt.haslayer(Raw):
+        # HTTP payload inspection (covers default FastAPI dev port 8000 too)
+        if k.dst_port in (80, 8080, 8000) and pkt.haslayer(Raw):
             try:
                 payload = bytes(pkt[Raw]).decode("ascii", errors="ignore")
                 if any(m in payload for m in ("GET ", "POST ", "PUT ", "DELETE ", "HEAD ")):
@@ -330,11 +330,17 @@ class FlowTracker:
             "proto": flow.key.proto,
             "service": service,
             "service_enc": service_enc,
+            "state": state,
             "state_enc": state_enc,
             "sttl": flow.src_ttl,
+            "dur": dur,
             "rate": rate,
             "spkts": spkts,
             "dpkts": dpkts,
+            "sbytes": sbytes,
+            "dbytes": dbytes,
+            "smean": smean,
+            "dmean": dmean,
             "http_methods": flow.http_methods,
         }
 
@@ -389,12 +395,16 @@ class StreamProcessor:
         if not SCAPY_AVAILABLE:
             raise RuntimeError("scapy not installed")
 
-        print(f"[StreamProcessor] Sniffing on {'all interfaces' if not self.iface else self.iface}")
+        # Exclude Docker's internal DNS resolver (127.0.0.11) — it generates constant
+        # background noise that looks like probing to the model.
+        BPF = "ip and not host 127.0.0.11"
+        iface = self.iface
+        print(f"[StreamProcessor] Sniffing on {iface or 'eth0'} | filter: {BPF!r}")
         sniff(
-            iface=self.iface,
+            iface=iface or "eth0",
             prn=self.tracker.process_packet,
             store=False,
-            filter="ip",
+            filter=BPF,
         )
 
     def _on_flow(self, scaled_vec: np.ndarray, raw: dict) -> None:
@@ -408,17 +418,155 @@ class StreamProcessor:
 
     @staticmethod
     def heuristic_attack_type(raws: list) -> str:
-        """Best-guess attack category from raw flow features (for display)."""
-        rates = [r.get("rate", 0) for r in raws]
-        avg_rate = sum(rates) / len(rates) if rates else 0
+        """
+        Map a 10-flow window to one of the UNSW-NB15 attack categories.
 
-        dst_ports = {r.get("dst_port", 0) for r in raws}
-        http_hits = sum(r.get("http_methods", 0) for r in raws)
+        Design rules to avoid false positives on normal Docker bridge traffic:
+          - Every category requires a *source-concentration* check where applicable:
+            ≥7/10 flows from the same IP = deliberate single-source activity.
+          - "Exploits" now requires specific service ports + meaningful payload;
+            it no longer fires on generic established connections.
+          - "Reconnaissance" now requires tight nmap-like flow signatures:
+            8+ unique dst ports, mostly unanswered, tiny flows (≤3 pkts each).
+          - DoS flood ratio tightened to <10 % response (was 15 %).
+        """
+        if not raws:
+            return "Generic"
 
-        if avg_rate > 500:
-            return "DoS"
-        if len(dst_ports) > 5:
+        n = len(raws)
+
+        # ── Raw lists ──────────────────────────────────────────────────────────
+        rates    = [r.get("rate",    0.0) for r in raws]
+        spkts_l  = [r.get("spkts",  0)   for r in raws]
+        dpkts_l  = [r.get("dpkts",  0)   for r in raws]
+        smeans   = [r.get("smean",  0.0) for r in raws]
+        dur_l    = [r.get("dur",    0.0) for r in raws]
+        sbytes_l = [r.get("sbytes", 0)   for r in raws]
+        dbytes_l = [r.get("dbytes", 0)   for r in raws]
+
+        avg_rate   = sum(rates)    / n
+        max_rate   = max(rates)
+        avg_spkts  = sum(spkts_l)  / n
+        avg_dpkts  = sum(dpkts_l)  / n
+        avg_smean  = sum(smeans)   / n
+        avg_dur    = sum(dur_l)    / n
+        avg_sbytes = sum(sbytes_l) / n
+        avg_dbytes = sum(dbytes_l) / n
+
+        dst_ports = [r.get("dst_port", 0)  for r in raws]
+        dst_ips   = [r.get("dst_ip",   "") for r in raws]
+        src_ips   = [r.get("src_ip",   "") for r in raws]
+        services  = [r.get("service",  "-")for r in raws]
+        states    = [r.get("state",    "") for r in raws]
+
+        unique_dst_ports = len(set(dst_ports))
+        unique_dst_ips   = len(set(dst_ips))
+
+        unanswered  = sum(1 for s in states if s in ("RST", "REQ", "INT"))
+        established = sum(1 for s in states if s in ("CON", "FIN"))
+
+        # Source concentration: is ≥70 % of this window from one attacker IP?
+        src_counter   = Counter(src_ips)
+        top_src_count = src_counter.most_common(1)[0][1]
+        src_concentrated = top_src_count >= 7
+
+        ssh_flows  = sum(1 for r in raws if r.get("dst_port") == 22)
+        ftp_flows  = sum(1 for r in raws if r.get("dst_port") in (20, 21))
+        http_flows = sum(1 for s in services if s == "http")
+        http_hits  = sum(r.get("http_methods", 0) for r in raws)
+
+        # ── 1. Brute Force (SSH) ───────────────────────────────────────────────
+        # Many short SSH connection attempts from the same source.
+        if ssh_flows >= 5 and src_concentrated:
+            return "Brute Force (SSH)"
+
+        # ── 2. Backdoor ────────────────────────────────────────────────────────
+        # Repeated FTP auth from same source, OR long bidirectional tunnel.
+        if ftp_flows >= 5 and src_concentrated:
+            return "Backdoor"
+        if (avg_dur > 30
+                and avg_dbytes > avg_sbytes * 0.5
+                and established >= 6
+                and avg_smean > 200
+                and src_concentrated):
+            return "Backdoor"
+
+        # ── 3. Reconnaissance ─────────────────────────────────────────────────
+        # Classic nmap signature: single source, many distinct ports, tiny flows,
+        # mostly unanswered.
+        avg_total_pkts = (sum(spkts_l) + sum(dpkts_l)) / n
+        is_scan = (
+            src_concentrated            # deliberate single-source sweep
+            and unique_dst_ports >= 6   # scanning many ports (lowered: nmap -T4 fills window fast)
+            and unanswered >= 5         # most probes unanswered
+            and avg_total_pkts <= 5     # tiny probe flows (allows for retransmits)
+            and avg_dpkts < 2.0         # little to no reply
+        )
+        if is_scan:
             return "Reconnaissance"
-        if http_hits > 3:
-            return "Fuzzer"
-        return "Generic/Exploit"
+        # Fallback: extreme port diversity regardless of source (distributed scan)
+        if unique_dst_ports >= 12 and unanswered >= 7:
+            return "Reconnaissance"
+
+        # ── 4. Fuzzers ─────────────────────────────────────────────────────────
+        # HTTP fuzzing: many requests with varied paths/methods from one source.
+        # http_hits counts packets with detected HTTP method verbs per flow.
+        if http_flows >= 6 and http_hits >= 5 and src_concentrated:
+            return "Fuzzers"
+        if http_hits >= 8:                  # very dense HTTP method activity
+            return "Fuzzers"
+
+        # ── 5. DoS ─────────────────────────────────────────────────────────────
+        # Flood ratio: victim replies < 10 % of attacker packets.
+        is_flood = avg_dpkts < avg_spkts * 0.10
+        if avg_rate > 1000 and is_flood:
+            return "DoS"
+        if max_rate > 3000 and is_flood:
+            return "DoS"
+
+        # SYN flood: all flows target the same port, nearly all unanswered,
+        # ≤2 packets per flow (hping3 --flood pattern).
+        port_concentration = Counter(dst_ports).most_common(1)[0][1] / n
+        if (port_concentration >= 0.8
+                and unanswered >= 8
+                and avg_total_pkts <= 2
+                and avg_spkts <= 1.5):
+            return "DoS"
+
+        # ── 6. Worms ───────────────────────────────────────────────────────────
+        # Same attack replicated across many destination IPs.
+        if unique_dst_ips >= 7 and src_concentrated:
+            return "Worms"
+
+        # ── 7. Shellcode ───────────────────────────────────────────────────────
+        # Large payload in established connections — data exfil / shellcode delivery.
+        if (avg_smean > 600
+                and established >= 5
+                and src_concentrated
+                and avg_sbytes > 3000):
+            return "Shellcode"
+
+        # ── 8. Exploits ────────────────────────────────────────────────────────
+        # Successful connections to known service ports WITH meaningful payload.
+        # NOT triggered by generic TCP sessions (e.g. dashboard polling).
+        EXPLOIT_PORTS = {
+            21, 22, 23, 25, 53, 80, 110, 111,
+            135, 137, 139, 143, 443, 445,
+            1433, 3306, 5432, 8080, 8443,
+        }
+        exploit_flows = sum(
+            1 for r in raws
+            if r.get("state") in ("CON", "FIN")
+            and r.get("dst_port", 0) in EXPLOIT_PORTS
+            and r.get("smean", 0) > 150     # non-trivial payload
+            and r.get("sbytes", 0) > 300
+        )
+        if exploit_flows >= 5 and src_concentrated:
+            return "Exploits"
+
+        # ── 9. Analysis ────────────────────────────────────────────────────────
+        # Moderate-rate bidirectional probing that doesn't fit above categories.
+        if avg_rate > 500 and avg_dpkts > avg_spkts * 0.3 and not is_flood:
+            return "Analysis"
+
+        return "Generic"

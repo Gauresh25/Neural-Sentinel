@@ -3,6 +3,5 @@ uvicorn[standard]==0.30.6
 scapy==2.5.0
 numpy==2.0.1
 scikit-learn==1.5.1
-torch==2.5.1
 keras==3.11.3
 pydantic==2.9.2

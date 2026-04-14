@@ -1,0 +1,78 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --attack: #ff2d55;
+  --normal: #00ff88;
+  --warn:   #ffd60a;
+  --info:   #0a84ff;
+  --cyan:   #64ffda;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background-color: #080b14;
+  color: #e2e8f0;
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar       { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: #0d1117; }
+::-webkit-scrollbar-thumb { background: #263249; border-radius: 2px; }
+
+/* Glow utilities */
+.glow-green { box-shadow: 0 0 18px rgba(0,255,136,0.12); }
+.glow-red   { box-shadow: 0 0 18px rgba(255,45,85,0.15); }
+.glow-blue  { box-shadow: 0 0 18px rgba(10,132,255,0.12); }
+
+.text-neon-green { color: var(--normal); text-shadow: 0 0 8px rgba(0,255,136,0.5); }
+.text-neon-red   { color: var(--attack); text-shadow: 0 0 8px rgba(255,45,85,0.5); }
+
+.card {
+  background-color: #0f1623;
+  border: 1px solid #1c2333;
+  border-radius: 10px;
+  padding: 1rem;
+}
+
+.alert-row {
+  border-left: 2px solid transparent;
+  padding: 6px 8px;
+  border-radius: 4px;
+  transition: background 0.15s;
+  animation: fadeIn 0.25s ease;
+}
+.alert-row:hover         { background: #1c2333; }
+.alert-row.is-attack     { border-left-color: var(--attack); }
+.alert-row.is-normal     { border-left-color: var(--normal); }
+
+.badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.badge-attack  { background: rgba(255,45,85,0.15);  color: var(--attack); }
+.badge-normal  { background: rgba(0,255,136,0.12);  color: var(--normal); }
+.badge-info    { background: rgba(10,132,255,0.15); color: var(--info); }
+.badge-warn    { background: rgba(255,214,10,0.15); color: var(--warn); }
+.badge-purple  { background: rgba(191,90,242,0.15); color: #bf5af2; }
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.25; }
+}
+.pulse-dot { animation: pulse-dot 2s infinite; }
