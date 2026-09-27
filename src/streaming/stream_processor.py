@@ -3,45 +3,92 @@ Stream processor: captures live packets, extracts UNSW-NB15-compatible flow
 features, scales them, and submits 10-flow sequences for inference.
 """
 
-import time
-import threading
 import pickle
-import numpy as np
-from collections import deque, Counter
+import threading
+import time
+from collections import Counter, deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Callable, NamedTuple
+from typing import NamedTuple
+
+import numpy as np
 
 try:
-    from scapy.all import sniff, IP, TCP, UDP, ICMP, Raw
+    from scapy.all import IP, TCP, UDP, Raw, sniff
+
     SCAPY_AVAILABLE = True
 except ImportError:
     SCAPY_AVAILABLE = False
 
-ROOT = Path(__file__).parent.parent
+ROOT = Path(__file__).parent.parent.parent
 DATA_DIR = ROOT / "data" / "processed" / "unsw-nb15"
 
 # UNSW-NB15 port → service mapping (matches training data encoding)
 PORT_SERVICE = {
-    20: "ftp-data", 21: "ftp", 22: "ssh", 23: "telnet",
-    25: "smtp", 53: "dns", 67: "dhcp", 68: "dhcp",
-    80: "http", 110: "pop3", 143: "imap", 161: "snmp",
-    443: "ssl", 6667: "irc", 8080: "http", 8000: "http",
+    20: "ftp-data",
+    21: "ftp",
+    22: "ssh",
+    23: "telnet",
+    25: "smtp",
+    53: "dns",
+    67: "dhcp",
+    68: "dhcp",
+    80: "http",
+    110: "pop3",
+    143: "imap",
+    161: "snmp",
+    443: "ssl",
+    6667: "irc",
+    8080: "http",
+    8000: "http",
 }
 
 # Feature order must match metadata.json exactly (44 features)
 FEATURE_NAMES = [
-    "id", "dur", "proto", "service", "state",
-    "spkts", "dpkts", "sbytes", "dbytes", "rate",
-    "sttl", "dttl", "sload", "dload", "sloss", "dloss",
-    "sinpkt", "dinpkt", "sjit", "djit",
-    "swin", "stcpb", "dtcpb", "dwin",
-    "tcprtt", "synack", "ackdat",
-    "smean", "dmean", "trans_depth", "response_body_len",
-    "ct_srv_src", "ct_state_ttl", "ct_dst_ltm",
-    "ct_src_dport_ltm", "ct_dst_sport_ltm", "ct_dst_src_ltm",
-    "is_ftp_login", "ct_ftp_cmd", "ct_flw_http_mthd",
-    "ct_src_ltm", "ct_srv_dst", "is_sm_ips_ports",
+    "id",
+    "dur",
+    "proto",
+    "service",
+    "state",
+    "spkts",
+    "dpkts",
+    "sbytes",
+    "dbytes",
+    "rate",
+    "sttl",
+    "dttl",
+    "sload",
+    "dload",
+    "sloss",
+    "dloss",
+    "sinpkt",
+    "dinpkt",
+    "sjit",
+    "djit",
+    "swin",
+    "stcpb",
+    "dtcpb",
+    "dwin",
+    "tcprtt",
+    "synack",
+    "ackdat",
+    "smean",
+    "dmean",
+    "trans_depth",
+    "response_body_len",
+    "ct_srv_src",
+    "ct_state_ttl",
+    "ct_dst_ltm",
+    "ct_src_dport_ltm",
+    "ct_dst_sport_ltm",
+    "ct_dst_src_ltm",
+    "is_ftp_login",
+    "ct_ftp_cmd",
+    "ct_flw_http_mthd",
+    "ct_src_ltm",
+    "ct_srv_dst",
+    "is_sm_ips_ports",
     "attack_cat",  # 0 at inference — we don't know yet
 ]
 
@@ -58,7 +105,7 @@ class FlowKey(NamedTuple):
 class FlowRecord:
     key: FlowKey
     start_time: float
-    src_pkts: list = field(default_factory=list)   # [(timestamp, size)]
+    src_pkts: list = field(default_factory=list)  # [(timestamp, size)]
     dst_pkts: list = field(default_factory=list)
     src_ttl: int = 64
     dst_ttl: int = 64
@@ -187,7 +234,7 @@ class FlowTracker:
                 flow.ack_time = now
 
         # State machine
-        if f & 0x04:   # RST
+        if f & 0x04:  # RST
             flow.state = "RST"
             flow.closed = True
         elif f & 0x01:  # FIN
@@ -284,8 +331,12 @@ class FlowTracker:
         smean = sbytes / spkts if spkts else 0
         dmean = dbytes / dpkts if dpkts else 0
 
-        synack_dur = (flow.synack_time - flow.syn_time) if (flow.syn_time and flow.synack_time) else 0.0
-        ackdat_dur = (flow.ack_time - flow.synack_time) if (flow.synack_time and flow.ack_time) else 0.0
+        synack_dur = (
+            (flow.synack_time - flow.syn_time) if (flow.syn_time and flow.synack_time) else 0.0
+        )
+        ackdat_dur = (
+            (flow.ack_time - flow.synack_time) if (flow.synack_time and flow.ack_time) else 0.0
+        )
         tcprtt = synack_dur + ackdat_dur
 
         service = PORT_SERVICE.get(flow.key.dst_port, PORT_SERVICE.get(flow.key.src_port, "-"))
@@ -306,17 +357,31 @@ class FlowTracker:
         def ct(cond):
             return sum(1 for r in recent if cond(r))
 
-        ct_srv_src = ct(lambda r: r["service_enc"] == service_enc and r["src_ip"] == flow.key.src_ip)
+        ct_srv_src = ct(
+            lambda r: r["service_enc"] == service_enc and r["src_ip"] == flow.key.src_ip
+        )
         ct_state_ttl = ct(lambda r: r["state_enc"] == state_enc and r["sttl"] == flow.src_ttl)
         ct_dst_ltm = ct(lambda r: r["dst_ip"] == flow.key.dst_ip)
-        ct_src_dport_ltm = ct(lambda r: r["src_ip"] == flow.key.src_ip and r["dst_port"] == flow.key.dst_port)
-        ct_dst_sport_ltm = ct(lambda r: r["dst_ip"] == flow.key.dst_ip and r["src_port"] == flow.key.src_port)
-        ct_dst_src_ltm = ct(lambda r: r["dst_ip"] == flow.key.dst_ip and r["src_ip"] == flow.key.src_ip)
+        ct_src_dport_ltm = ct(
+            lambda r: r["src_ip"] == flow.key.src_ip and r["dst_port"] == flow.key.dst_port
+        )
+        ct_dst_sport_ltm = ct(
+            lambda r: r["dst_ip"] == flow.key.dst_ip and r["src_port"] == flow.key.src_port
+        )
+        ct_dst_src_ltm = ct(
+            lambda r: r["dst_ip"] == flow.key.dst_ip and r["src_ip"] == flow.key.src_ip
+        )
         ct_src_ltm = ct(lambda r: r["src_ip"] == flow.key.src_ip)
-        ct_srv_dst = ct(lambda r: r["service_enc"] == service_enc and r["dst_ip"] == flow.key.dst_ip)
+        ct_srv_dst = ct(
+            lambda r: r["service_enc"] == service_enc and r["dst_ip"] == flow.key.dst_ip
+        )
 
         is_ftp_login = 1 if flow.key.dst_port == 21 and flow.ftp_cmds > 0 else 0
-        is_sm_ips_ports = 1 if (flow.key.src_ip == flow.key.dst_ip and flow.key.src_port == flow.key.dst_port) else 0
+        is_sm_ips_ports = (
+            1
+            if (flow.key.src_ip == flow.key.dst_ip and flow.key.src_port == flow.key.dst_port)
+            else 0
+        )
 
         with self._lock:
             self.flow_id += 1
@@ -344,21 +409,55 @@ class FlowTracker:
             "http_methods": flow.http_methods,
         }
 
-        vec = np.array([
-            fid, dur, proto_enc, service_enc, state_enc,
-            spkts, dpkts, sbytes, dbytes, rate,
-            flow.src_ttl, flow.dst_ttl,
-            sload, dload, 0, 0,          # sloss/dloss = 0 (not tracked)
-            sinpkt, dinpkt, sjit, djit,
-            flow.src_win, flow.src_tcp_seq, flow.dst_tcp_seq, flow.dst_win,
-            tcprtt, synack_dur, ackdat_dur,
-            smean, dmean, flow.trans_depth, flow.response_body_len,
-            ct_srv_src, ct_state_ttl, ct_dst_ltm,
-            ct_src_dport_ltm, ct_dst_sport_ltm, ct_dst_src_ltm,
-            is_ftp_login, flow.ftp_cmds, flow.http_methods,
-            ct_src_ltm, ct_srv_dst, is_sm_ips_ports,
-            0,  # attack_cat unknown at inference
-        ], dtype=np.float64).reshape(1, -1)
+        vec = np.array(
+            [
+                fid,
+                dur,
+                proto_enc,
+                service_enc,
+                state_enc,
+                spkts,
+                dpkts,
+                sbytes,
+                dbytes,
+                rate,
+                flow.src_ttl,
+                flow.dst_ttl,
+                sload,
+                dload,
+                0,
+                0,  # sloss/dloss = 0 (not tracked)
+                sinpkt,
+                dinpkt,
+                sjit,
+                djit,
+                flow.src_win,
+                flow.src_tcp_seq,
+                flow.dst_tcp_seq,
+                flow.dst_win,
+                tcprtt,
+                synack_dur,
+                ackdat_dur,
+                smean,
+                dmean,
+                flow.trans_depth,
+                flow.response_body_len,
+                ct_srv_src,
+                ct_state_ttl,
+                ct_dst_ltm,
+                ct_src_dport_ltm,
+                ct_dst_sport_ltm,
+                ct_dst_src_ltm,
+                is_ftp_login,
+                flow.ftp_cmds,
+                flow.http_methods,
+                ct_src_ltm,
+                ct_srv_dst,
+                is_sm_ips_ports,
+                0,  # attack_cat unknown at inference
+            ],
+            dtype=np.float64,
+        ).reshape(1, -1)
 
         try:
             scaled = self.scaler.transform(vec)[0].astype(np.float32)
@@ -373,7 +472,7 @@ class StreamProcessor:
 
     SEQ_LEN = 10
 
-    def __init__(self, on_prediction: Callable, iface: Optional[str] = None):
+    def __init__(self, on_prediction: Callable, iface: str | None = None):
         self.on_prediction = on_prediction
         self.iface = iface
         self.seq_window: deque = deque(maxlen=self.SEQ_LEN)
@@ -412,7 +511,7 @@ class StreamProcessor:
         self.seq_raws.append(raw)
 
         if len(self.seq_window) == self.SEQ_LEN:
-            sequence = np.stack(list(self.seq_window))   # (10, 44)
+            sequence = np.stack(list(self.seq_window))  # (10, 44)
             raws = list(self.seq_raws)
             self.on_prediction(sequence, raws)
 
@@ -436,59 +535,63 @@ class StreamProcessor:
         n = len(raws)
 
         # ── Raw lists ──────────────────────────────────────────────────────────
-        rates    = [r.get("rate",    0.0) for r in raws]
-        spkts_l  = [r.get("spkts",  0)   for r in raws]
-        dpkts_l  = [r.get("dpkts",  0)   for r in raws]
-        smeans   = [r.get("smean",  0.0) for r in raws]
-        dur_l    = [r.get("dur",    0.0) for r in raws]
-        sbytes_l = [r.get("sbytes", 0)   for r in raws]
-        dbytes_l = [r.get("dbytes", 0)   for r in raws]
+        rates = [r.get("rate", 0.0) for r in raws]
+        spkts_l = [r.get("spkts", 0) for r in raws]
+        dpkts_l = [r.get("dpkts", 0) for r in raws]
+        smeans = [r.get("smean", 0.0) for r in raws]
+        dur_l = [r.get("dur", 0.0) for r in raws]
+        sbytes_l = [r.get("sbytes", 0) for r in raws]
+        dbytes_l = [r.get("dbytes", 0) for r in raws]
 
-        avg_rate   = sum(rates)    / n
-        max_rate   = max(rates)
-        avg_spkts  = sum(spkts_l)  / n
-        avg_dpkts  = sum(dpkts_l)  / n
-        avg_smean  = sum(smeans)   / n
-        avg_dur    = sum(dur_l)    / n
+        avg_rate = sum(rates) / n
+        max_rate = max(rates)
+        avg_spkts = sum(spkts_l) / n
+        avg_dpkts = sum(dpkts_l) / n
+        avg_smean = sum(smeans) / n
+        avg_dur = sum(dur_l) / n
         avg_sbytes = sum(sbytes_l) / n
         avg_dbytes = sum(dbytes_l) / n
 
-        dst_ports = [r.get("dst_port", 0)  for r in raws]
-        dst_ips   = [r.get("dst_ip",   "") for r in raws]
-        src_ips   = [r.get("src_ip",   "") for r in raws]
-        services  = [r.get("service",  "-")for r in raws]
-        states    = [r.get("state",    "") for r in raws]
+        dst_ports = [r.get("dst_port", 0) for r in raws]
+        dst_ips = [r.get("dst_ip", "") for r in raws]
+        src_ips = [r.get("src_ip", "") for r in raws]
+        services = [r.get("service", "-") for r in raws]
+        states = [r.get("state", "") for r in raws]
 
         unique_dst_ports = len(set(dst_ports))
-        unique_dst_ips   = len(set(dst_ips))
+        unique_dst_ips = len(set(dst_ips))
 
-        unanswered  = sum(1 for s in states if s in ("RST", "REQ", "INT"))
+        unanswered = sum(1 for s in states if s in ("RST", "REQ", "INT"))
         established = sum(1 for s in states if s in ("CON", "FIN"))
 
         # Source concentration: is ≥70 % of this window from one attacker IP?
-        src_counter   = Counter(src_ips)
+        src_counter = Counter(src_ips)
         top_src_count = src_counter.most_common(1)[0][1]
         src_concentrated = top_src_count >= 7
 
-        ssh_flows  = sum(1 for r in raws if r.get("dst_port") == 22)
-        ftp_flows  = sum(1 for r in raws if r.get("dst_port") in (20, 21))
+        ssh_flows = sum(1 for r in raws if r.get("dst_port") in (22, 2222))
+        ftp_flows = sum(1 for r in raws if r.get("dst_port") in (20, 21))
         http_flows = sum(1 for s in services if s == "http")
-        http_hits  = sum(r.get("http_methods", 0) for r in raws)
+        http_hits = sum(r.get("http_methods", 0) for r in raws)
 
         # ── 1. Brute Force (SSH) ───────────────────────────────────────────────
-        # Many short SSH connection attempts from the same source.
-        if ssh_flows >= 5 and src_concentrated:
+        # Many short SSH connection attempts — port concentration is the signal,
+        # so src_concentrated is not required (distributed brute-force also counts,
+        # and frontend polling dilutes the window enough to break that check anyway).
+        if ssh_flows >= 5:
             return "Brute Force (SSH)"
 
         # ── 2. Backdoor ────────────────────────────────────────────────────────
         # Repeated FTP auth from same source, OR long bidirectional tunnel.
         if ftp_flows >= 5 and src_concentrated:
             return "Backdoor"
-        if (avg_dur > 30
-                and avg_dbytes > avg_sbytes * 0.5
-                and established >= 6
-                and avg_smean > 200
-                and src_concentrated):
+        if (
+            avg_dur > 30
+            and avg_dbytes > avg_sbytes * 0.5
+            and established >= 6
+            and avg_smean > 200
+            and src_concentrated
+        ):
             return "Backdoor"
 
         # ── 3. Reconnaissance ─────────────────────────────────────────────────
@@ -496,11 +599,11 @@ class StreamProcessor:
         # mostly unanswered.
         avg_total_pkts = (sum(spkts_l) + sum(dpkts_l)) / n
         is_scan = (
-            src_concentrated            # deliberate single-source sweep
-            and unique_dst_ports >= 6   # scanning many ports (lowered: nmap -T4 fills window fast)
-            and unanswered >= 5         # most probes unanswered
-            and avg_total_pkts <= 5     # tiny probe flows (allows for retransmits)
-            and avg_dpkts < 2.0         # little to no reply
+            src_concentrated  # deliberate single-source sweep
+            and unique_dst_ports >= 6  # scanning many ports (lowered: nmap -T4 fills window fast)
+            and unanswered >= 5  # most probes unanswered
+            and avg_total_pkts <= 5  # tiny probe flows (allows for retransmits)
+            and avg_dpkts < 2.0  # little to no reply
         )
         if is_scan:
             return "Reconnaissance"
@@ -513,7 +616,7 @@ class StreamProcessor:
         # http_hits counts packets with detected HTTP method verbs per flow.
         if http_flows >= 6 and http_hits >= 5 and src_concentrated:
             return "Fuzzers"
-        if http_hits >= 8:                  # very dense HTTP method activity
+        if http_hits >= 8:  # very dense HTTP method activity
             return "Fuzzers"
 
         # ── 5. DoS ─────────────────────────────────────────────────────────────
@@ -527,10 +630,12 @@ class StreamProcessor:
         # SYN flood: all flows target the same port, nearly all unanswered,
         # ≤2 packets per flow (hping3 --flood pattern).
         port_concentration = Counter(dst_ports).most_common(1)[0][1] / n
-        if (port_concentration >= 0.8
-                and unanswered >= 8
-                and avg_total_pkts <= 2
-                and avg_spkts <= 1.5):
+        if (
+            port_concentration >= 0.8
+            and unanswered >= 8
+            and avg_total_pkts <= 2
+            and avg_spkts <= 1.5
+        ):
             return "DoS"
 
         # ── 6. Worms ───────────────────────────────────────────────────────────
@@ -540,25 +645,39 @@ class StreamProcessor:
 
         # ── 7. Shellcode ───────────────────────────────────────────────────────
         # Large payload in established connections — data exfil / shellcode delivery.
-        if (avg_smean > 600
-                and established >= 5
-                and src_concentrated
-                and avg_sbytes > 3000):
+        if avg_smean > 600 and established >= 5 and src_concentrated and avg_sbytes > 3000:
             return "Shellcode"
 
         # ── 8. Exploits ────────────────────────────────────────────────────────
         # Successful connections to known service ports WITH meaningful payload.
         # NOT triggered by generic TCP sessions (e.g. dashboard polling).
         EXPLOIT_PORTS = {
-            21, 22, 23, 25, 53, 80, 110, 111,
-            135, 137, 139, 143, 443, 445,
-            1433, 3306, 5432, 8080, 8443,
+            21,
+            22,
+            23,
+            25,
+            53,
+            80,
+            110,
+            111,
+            135,
+            137,
+            139,
+            143,
+            443,
+            445,
+            1433,
+            3306,
+            5432,
+            8080,
+            8443,
         }
         exploit_flows = sum(
-            1 for r in raws
+            1
+            for r in raws
             if r.get("state") in ("CON", "FIN")
             and r.get("dst_port", 0) in EXPLOIT_PORTS
-            and r.get("smean", 0) > 150     # non-trivial payload
+            and r.get("smean", 0) > 150  # non-trivial payload
             and r.get("sbytes", 0) > 300
         )
         if exploit_flows >= 5 and src_concentrated:
@@ -566,7 +685,7 @@ class StreamProcessor:
 
         # ── 9. Analysis ────────────────────────────────────────────────────────
         # Moderate-rate bidirectional probing that doesn't fit above categories.
-        if avg_rate > 500 and avg_dpkts > avg_spkts * 0.3 and not is_flood:
+        if avg_rate > 2000 and avg_dpkts > avg_spkts * 0.3 and not is_flood:
             return "Analysis"
 
         return "Generic"

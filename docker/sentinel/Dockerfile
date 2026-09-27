@@ -16,6 +16,9 @@ RUN useradd -m -s /bin/bash demo_user \
  && echo "demo_user:s3ntinel_brute" | chpasswd \
  && echo "root:toor" | chpasswd
 
+# Pipe auth.log to stdout so `docker logs sentinel` shows brute-force attempts
+RUN ln -sf /dev/stdout /var/log/auth.log
+
 RUN mkdir -p /run/sshd \
  && sed -i 's/#Port 22/Port 2222/'                          /etc/ssh/sshd_config \
  && sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config \

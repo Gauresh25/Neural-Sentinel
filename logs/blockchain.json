@@ -1,0 +1,12 @@
+[
+  {
+    "index": 0,
+    "timestamp": 1789122723.892617,
+    "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "data": {
+      "event": "genesis",
+      "msg": "Neural Sentinel chain initialised"
+    },
+    "hash": "6dfccd4c7d4f1be9734a85f0951b52cc6287ec4e90a2cd515ff397590515898d"
+  }
+]

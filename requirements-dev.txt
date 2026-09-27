@@ -1,0 +1,8 @@
+# Test-only dependencies, on top of the app's own runtime deps
+# (see docker/sentinel/requirements.txt for those — fastapi, keras, scikit-learn, etc.)
+pytest
+
+# Lint/format — versions pinned to match .pre-commit-config.yaml
+ruff==0.16.7
+black==26.5.1
+pre-commit

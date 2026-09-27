@@ -1,0 +1,16 @@
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = ["notebooks", "data", "models", "logs"]
+
+[tool.ruff.lint]
+# E/F/W = pycodestyle + pyflakes (the actual conventional default), I = import
+# sorting, UP = pyupgrade (modernize syntax for the target Python version).
+# Deliberately not enabling bandit (S) / blind-except (BLE) — this codebase
+# catches broad exceptions on purpose in the packet-parsing path, where
+# malformed input is expected traffic, not a bug.
+select = ["E", "F", "W", "I", "UP"]

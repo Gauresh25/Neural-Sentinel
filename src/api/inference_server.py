@@ -8,9 +8,9 @@ FastAPI app that:
   - exposes POST /predict for manual testing
 """
 
-import os
 import asyncio
 import json
+import os
 import threading
 import time
 from collections import deque
@@ -21,19 +21,20 @@ os.environ.setdefault("KERAS_BACKEND", "torch")
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 
+import keras
 import numpy as np
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
-import keras
+from blockchain.local_blockchain import LocalBlockchain
+from streaming.stream_processor import StreamProcessor
 
-from stream_processor import StreamProcessor
-
-ROOT = Path(__file__).parent.parent
+ROOT = Path(__file__).parent.parent.parent
 MODEL_PATH = ROOT / "models" / "bilstm_unsw_nb15.keras"
 DASHBOARD_PATH = Path(__file__).parent / "dashboard.html"
+CHAIN_PATH = ROOT / "logs" / "blockchain.json"
 
 app = FastAPI(title="Neural Sentinel")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -45,18 +46,23 @@ _model: keras.Model = None
 _alert_queue: asyncio.Queue = None
 _loop: asyncio.AbstractEventLoop = None
 _recent_alerts: deque = deque(maxlen=500)
-_all_confidences: deque = deque(maxlen=500)   # (prob, label) for histogram
+_all_confidences: deque = deque(maxlen=500)  # (prob, label) for histogram
 _threshold: float = 0.5
 _stats = {"total": 0, "attacks": 0, "normal": 0, "start_time": time.time(), "by_category": {}}
+_chain: LocalBlockchain = None
 
 
 # ---------------------------------------------------------------------------
 # Startup
 # ---------------------------------------------------------------------------
 
+
 @app.on_event("startup")
 async def startup():
-    global _model, _alert_queue, _loop
+    global _model, _alert_queue, _loop, _chain
+
+    _chain = LocalBlockchain(CHAIN_PATH)
+    print(f"[Blockchain] Ready — {len(_chain)} blocks in chain.")
 
     print(f"[Sentinel] Loading model from {MODEL_PATH}")
     _model = keras.models.load_model(str(MODEL_PATH))
@@ -77,15 +83,16 @@ async def startup():
 # Core prediction
 # ---------------------------------------------------------------------------
 
+
 def _handle_prediction(sequence: np.ndarray, raws: list) -> None:
     """Called from stream processor thread. Posts result to asyncio queue."""
     global _threshold
-    batch = sequence[np.newaxis, ...]           # (1, 10, 44)
+    batch = sequence[np.newaxis, ...]  # (1, 10, 44)
     prob = float(_model.predict(batch, verbose=0).squeeze())
     label = int(prob >= _threshold)
     attack_type = StreamProcessor.heuristic_attack_type(raws)
     if not label and attack_type != "Generic":
-        label = 1   # heuristic override: clear signature even if model confidence is low
+        label = 1  # heuristic override: clear signature even if model confidence is low
     elif not label:
         attack_type = "Normal"
 
@@ -108,6 +115,18 @@ def _handle_prediction(sequence: np.ndarray, raws: list) -> None:
         _stats["attacks"] += 1
         cat = attack_type
         _stats["by_category"][cat] = _stats["by_category"].get(cat, 0) + 1
+        _chain.add_block(
+            {
+                "event": "alert",
+                "attack_type": attack_type,
+                "confidence": round(prob, 4),
+                "src_ip": last_raw.get("src_ip", "?"),
+                "dst_ip": last_raw.get("dst_ip", "?"),
+                "proto": last_raw.get("proto", "?"),
+                "service": last_raw.get("service", "-"),
+                "time": alert["time"],
+            }
+        )
     else:
         _stats["normal"] += 1
 
@@ -120,6 +139,7 @@ def _handle_prediction(sequence: np.ndarray, raws: list) -> None:
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
+
 
 class Sequence(BaseModel):
     sequence: list  # 10 × 44 nested list
@@ -139,6 +159,7 @@ async def predict(body: Sequence):
 @app.get("/alerts")
 async def alerts():
     """Server-Sent Events stream of live detections."""
+
     async def event_stream():
         while True:
             alert = await _alert_queue.get()
@@ -175,16 +196,15 @@ async def confidence_distribution():
     for i in range(10):
         lo, hi = i / 10, (i + 1) / 10
         label = f"{lo:.1f}–{hi:.1f}"
-        subset = [
-            (p, l) for p, l in confs
-            if lo <= p < hi or (i == 9 and p == 1.0)
-        ]
-        bins.append({
-            "range": label,
-            "total": len(subset),
-            "attack": sum(1 for _, l in subset if l == 1),
-            "normal": sum(1 for _, l in subset if l == 0),
-        })
+        subset = [(p, lbl) for p, lbl in confs if lo <= p < hi or (i == 9 and p == 1.0)]
+        bins.append(
+            {
+                "range": label,
+                "total": len(subset),
+                "attack": sum(1 for _, lbl in subset if lbl == 1),
+                "normal": sum(1 for _, lbl in subset if lbl == 0),
+            }
+        )
     return {"bins": bins, "threshold": _threshold}
 
 
@@ -216,6 +236,15 @@ class ThresholdBody(BaseModel):
     threshold: float
 
 
+@app.post("/sink")
+async def sink(request: Request):
+    """Data sink for shellcode simulation — reads and discards the body so
+    uvicorn closes the connection gracefully with FIN (not RST), ensuring
+    the flow is counted as 'established' by the stream processor."""
+    await request.body()
+    return {}
+
+
 @app.get("/threshold")
 async def get_threshold():
     return {"threshold": _threshold}
@@ -228,6 +257,21 @@ async def set_threshold(body: ThresholdBody):
     return {"threshold": _threshold}
 
 
+@app.get("/chain")
+async def chain_view(limit: int = 20):
+    """Return the last `limit` blocks (newest first) + integrity status."""
+    return {
+        "integrity": _chain.verify(),
+        "blocks": _chain.latest(limit),
+    }
+
+
+@app.get("/chain/verify")
+async def chain_verify():
+    """Quick integrity check — does NOT return block data."""
+    return _chain.verify()
+
+
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard():
     return DASHBOARD_PATH.read_text(encoding="utf-8")
@@ -238,10 +282,23 @@ async def root():
     return HTMLResponse('<meta http-equiv="refresh" content="0; url=/dashboard">')
 
 
+@app.post("/debug/tamper/{block_index}")
+async def tamper_block(block_index: int):
+    """DEV ONLY — mutates a block in memory to demo verify() failure."""
+    chain = _chain._chain  # access internal list
+    if block_index >= len(chain) or block_index == 0:
+        return JSONResponse({"error": "invalid index"}, status_code=400)
+
+    chain[block_index].data["tampered"] = True
+    # Leave the stored hash unchanged — this is what breaks verify()
+    return {"tampered": block_index, "data": chain[block_index].data}
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run("inference_server:app", host="0.0.0.0", port=8000, reload=False)

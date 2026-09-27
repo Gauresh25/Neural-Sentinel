@@ -2,7 +2,14 @@
   "permissions": {
     "allow": [
       "Bash(python -m jupyter nbconvert --to notebook --execute --ExecutePreprocessor.timeout=600 --ExecutePreprocessor.kernel_name=python3 notebooks/02_simple_lstm.ipynb --output notebooks/02_simple_lstm_run.ipynb)",
-      "Bash(python3)"
+      "Bash(python3)",
+      "Bash(mkdir -p src/api src/streaming src/blockchain)",
+      "Bash(git mv *)",
+      "Bash(mv src/local_blockchain.py src/blockchain/local_blockchain.py)",
+      "Bash(rm -rf src/__pycache__)",
+      "Bash(touch src/api/__init__.py src/streaming/__init__.py src/blockchain/__init__.py)",
+      "Bash(python -c \"import ast; [ast.parse\\(open\\(f, encoding='utf-8'\\).read\\(\\), f\\) for f in ['src/api/inference_server.py','src/streaming/stream_processor.py','src/blockchain/local_blockchain.py']]; print\\('syntax OK'\\)\")",
+      "PowerShell(& \"C:\\\\Users\\\\Gauresh\\\\anaconda3\\\\Scripts\\\\conda.exe\" env list)"
     ]
   }
 }

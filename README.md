@@ -333,10 +333,13 @@ neural-sentinel/
 │   └── 04_federated_learning.ipynb     # FL simulation: 3 nodes, 5 rounds, FedAvg, NSL-KDD
 │
 ├── src/
-│   ├── inference_server.py             # FastAPI: model loading, prediction, SSE, all endpoints
-│   ├── stream_processor.py             # Packet capture, flow tracking, UNSW-NB15 feature extraction
-│   ├── local_blockchain.py             # SHA-256 linked chain, thread-safe, atomic JSON persistence
-│   └── dashboard.html                  # Fallback single-file dashboard
+│   ├── api/
+│   │   ├── inference_server.py         # FastAPI: model loading, prediction, SSE, all endpoints
+│   │   └── dashboard.html              # Fallback single-file dashboard
+│   ├── streaming/
+│   │   └── stream_processor.py         # Packet capture, flow tracking, UNSW-NB15 feature extraction
+│   └── blockchain/
+│       └── local_blockchain.py         # SHA-256 linked chain, thread-safe, atomic JSON persistence
 │
 ├── frontend/                           # React + TypeScript + Tailwind dashboard
 │   └── src/
@@ -399,10 +402,10 @@ jupyter notebook
 
 # Start inference server
 cd src
-uvicorn inference_server:app --host 0.0.0.0 --port 8000
+uvicorn api.inference_server:app --host 0.0.0.0 --port 8000
 ```
 
-> The stream processor requires raw socket access (scapy). On Linux: `sudo python inference_server.py`. On Windows: run terminal as Administrator. If scapy is unavailable the server starts normally — use `POST /predict` for manual testing.
+> The stream processor requires raw socket access (scapy). On Linux: `sudo uvicorn api.inference_server:app`. On Windows: run terminal as Administrator. If scapy is unavailable the server starts normally — use `POST /predict` for manual testing.
 
 ### Environment Variables
 

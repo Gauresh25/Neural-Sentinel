@@ -1,11 +1,13 @@
 """Run a notebook from the project root directory."""
+
 import os
 import sys
+
 import nbformat
 from nbclient import NotebookClient
 
 # Must be set before torch/MKL load in the kernel subprocess
-os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 notebook_path = sys.argv[1] if len(sys.argv) > 1 else "notebooks/03_bilstm_training.ipynb"
 
